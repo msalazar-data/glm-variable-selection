@@ -1,0 +1,578 @@
+---
+output:
+  pdf_document:
+    latex_engine: xelatex
+header-includes:
+  - \usepackage[scaled]{helvet}     
+  - \renewcommand\familydefault{\sfdefault}
+  - \usepackage{xcolor}
+  - \usepackage{titlesec}
+  - \usepackage{booktabs}
+  - \usepackage{float}
+  - \definecolor{headingcolor}{RGB}{0,51,102}
+  - \titleformat{\section}{\color{headingcolor}\Large\fontseries{sb}\selectfont}{\thesection}{1em}{}
+  - \titleformat{\subsection}{\color{headingcolor}\large\fontseries{sb}\selectfont}{\thesubsection}{1em}{}
+  - \setlength{\parskip}{0.5em}
+  - \setlength{\parindent}{0pt}
+  - \usepackage{setspace}
+  - \setstretch{1.3}
+  - \renewcommand{\contentsname}{Contenido}  
+  - \renewcommand{\tablename}{Tabla}         
+  - \renewcommand{\figurename}{Figura}  
+geometry: margin=1in
+fontsize: 11pt
+documentclass: article
+---
+
+\begin{titlepage}
+\centering
+\vspace*{3cm}
+{\Huge\fontseries{sb}\selectfont\color{headingcolor}Selección de Variables: Modelado de Grasa Corporal\par}
+\vspace{0.8cm}
+{\Large\color{headingcolor}Base de Datos: fat (faraway)\par}
+\vspace{0.3cm}
+{\Large\color{headingcolor}Tarea 1 - Selección de Variables en GLM\par}
+\vspace{2.5cm}
+{\large\fontseries{sb}\selectfont Equipo de Análisis\par}
+\vspace{0.5cm}
+Dámaso López, Alexis Aminadab\\
+Islas Zicatl, Max Emiliano\\
+Mares Guerra, José de Jesús\\
+Martínez Sánchez, José Ricardo\\
+Ramos López, Gabriela\\
+Salazar Argáez, Miguel Angel
+\vfill
+{\large\fontseries{sb}\selectfont{Statistical Methods and Mathematics for Data Science Diploma -- Team 9}\par}
+\end{titlepage}
+\newpage
+\tableofcontents
+\newpage
+
+```{r setup, include=FALSE}
+rm(list = ls(all.names = TRUE))
+library(dplyr)
+library(ggplot2)
+library(kableExtra)
+library(broom)
+library(MASS)
+library(bestglm)
+library(glmnet)
+library(faraway)
+
+options(knitr.table.format = function() {
+  if (knitr::is_latex_output()) "latex" else "html"
+})
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = "center")
+```
+# 1. Introducción
+
+El presente análisis tiene como objetivo identificar las variables clínicas que mejor explican el porcentaje de grasa corporal, medido a través de `brozek`, utilizando la base de datos fat del paquete faraway. Leyendo la documentación de la paquetería, se observa que esta base contiene información de 252 hombres, para quienes se registran edad, peso, estatura y 10 mediciones de circunferencia corporal. El porcentaje de grasa de cada individuo fue estimado con precisión mediante la técnica de pesaje hidrostático.
+
+Para ello, se estiman modelos para datos continuos bajo distintos enfoques de selección de variables —mejor subconjunto, stepwise y Lasso— empleando el criterio BIC como métrica de comparación. Adicionalmente, se evalúan extensiones que incorporan interacciones, distribuciones alternativas (Gamma) y términos cuadráticos, con el fin de capturar relaciones más complejas entre las variables. Previo a la estimación, se realiza un preprocesamiento de los datos para garantizar consistencia y calidad en los resultados.
+
+# 2. Preprocesamiento de datos
+
+Se excluyen del análisis las variables  `siri`, `density` y `free`. Asimismo, se depura la base eliminando observaciones con errores de captura o valores atípicos, como estaturas implausibles (por ejemplo, 29.5 pulgadas, aproximadamente 0.75 metros) y registros con porcentaje de grasa corporal igual a cero.
+
+Adicionalmente, se construye el índice de masa corporal (IMC), definido como:
+
+$$IMC = \frac{\text{peso (kg)}}{\text{estatura (m)}^2} = \frac{\text{peso (lb)} * 703}{\text{estatura (inch)}^2}$$
+El $IMC$ se utiliza como criterio auxiliar para identificar valores extremos ($IMC > 50$), quitando únicamente una observación de la base original. Posteriormente, esta variable es eliminada del conjunto de datos. Finalmente, se reordena la base de datos colocando la variable respuesta (`brozek`) en la última columna.
+
+```{r data_prep, include=FALSE}
+data(fat)
+fat$IMC <- ((fat$weight * 703) / (fat$height^2))
+df <- fat %>%
+  dplyr::select(-siri, -density, -free) %>%
+  dplyr::filter(IMC<50) %>%
+  dplyr::filter(brozek>0)
+
+# Para bestglm, la variable respuesta debe estar en la última columna
+df <- df %>% dplyr::select(-brozek, -IMC, brozek)
+n_obs <- nrow(df)
+```
+
+# 2. Selección con Efectos Principales
+
+En esta sección se ajustan modelos con distribución Gaussiana y liga identidad, considerando únicamente los efectos principales de las variables predictoras.
+
+## 2.1 Mejor subconjunto
+
+En este enfoque, se evaluaron exhaustivamente todos los modelos posibles con efectos principales. El criterio de optimización seleccionado fue el BIC, el cual penaliza de manera más estricta la inclusión de variables innecesarias.
+
+```{r procesamiento_datos, echo=FALSE, warning=FALSE, message=FALSE}
+
+seleccionar_mejor_modelo <- function(datos, variable_y, criterio = "AIC") {
+  # 1. Preparación de variables
+  nombres_vars <- colnames(datos)
+  predictores <- nombres_vars[nombres_vars != variable_y]
+  n <- length(predictores)
+  
+  mejor_score <- Inf
+  mejor_modelo <- NULL
+  
+  # 2. Iterar sobre todos los tamaños posibles de subconjuntos (de 1 a n)
+  for (i in 1:n) {
+    # Generar todas las combinaciones de tamaño i
+    combinaciones <- combn(predictores, i, simplify = FALSE)
+    
+    for (combo in combinaciones) {
+      # Crear la fórmula dinámicamente
+      formula_aux <- as.formula(paste(variable_y, "~", paste(combo, collapse = "+")))
+      
+      # Ajustar el modelo lineal
+      modelo_actual <- lm(formula_aux, data = datos)
+      
+      # Calcular score según el criterio
+      score_actual <- if (toupper(criterio) == "AIC") AIC(modelo_actual) else BIC(modelo_actual)
+      
+      # Guardar si es el mejor encontrado hasta ahora
+      if (score_actual < mejor_score) {
+        mejor_score <- score_actual
+        mejor_modelo <- modelo_actual
+      }
+    }
+  }
+  
+  # 3. Retornar el resultado
+  message(paste("Mejor modelo encontrado usando", criterio, ":"))
+  return(mejor_modelo)
+}
+
+resultado <- seleccionar_mejor_modelo(datos = df, variable_y = "brozek", criterio = "BIC")
+
+# Extraer resumen tipo summary
+tabla_resumen <- broom::tidy(resultado) %>%
+  dplyr::mutate(
+    estimate = round(estimate, 4),
+    std.error = round(std.error, 4),
+    statistic = round(statistic, 4),
+    p.value = format.pval(p.value, eps = 0.0001, scientific = TRUE)
+  ) %>%
+  dplyr::select(
+    `Variable Predictora` = term,
+    `Estimación` = estimate,
+    `Error Est.` = std.error,
+    `Valor t` = statistic,
+    `Valor p` = p.value
+  )
+
+# Mostrar la tabla formateada
+tabla_resumen %>%
+  kable(
+    caption = paste0("Mejor Modelo Seleccionado vía Evaluación Exhaustiva | BIC: ", round(BIC(resultado),2)),
+    booktabs = TRUE,
+    align = "lcccc"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE,
+    position = "center",
+    latex_options = "hold_position"
+  ) %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#826430")
+```
+
+```{r i_bestsubset, include=FALSE}
+
+# La función `regsubsets()` de la librería `leaps` permite realizar la misma búsqueda de mejor subconjunto.
+# Podemos apreciar que se llega al mismo resultado seleccionando las mismas variables
+library(leaps)
+
+modelos_subsets <- regsubsets(brozek ~ ., data = df, nvmax = 10)
+
+resumen <- summary(modelos_subsets)
+
+mejor_idx <- which.min(resumen$bic) # O resumen$cp para algo similar al AIC
+
+resumen$which[mejor_idx, ]
+```
+
+El modelo seleccionado alcanzó un BIC de **1432.16**. Es notable que todas las variables retenidas son altamente significativas ($p < 0.05$). El coeficiente positivo del abdomen (`abdom`) ($0.9157$) confirma que la circunferencia abdominal es el principal propulsor del porcentaje de grasa corporal. Curiosamente, el peso (`weight`) presenta un coeficiente negativo ($-0.1263$); esto ocurre porque, controlando por el tamaño del abdomen, un individuo más pesado probablemente tiene mayor densidad de masa magra (músculo/hueso), lo que reduce su porcentaje relativo de grasa.
+
+## 2.2 Método Stepwise
+
+Para este enfoque, se implementó un algoritmo de búsqueda iterativa bidireccional (*both*,combinando *forward* y *backward*) partiendo de un modelo nulo. Se utilizó explícitamente el criterio BIC (penalizando con $k = \log(n)$) para decidir la inclusión o exclusión de variables en cada paso iterativo.
+
+```{r i_stepwise, echo=FALSE, warning=FALSE, message=FALSE}
+# 1. Definición y ajuste del modelo Stepwise
+mod_nulo_i <- glm(brozek ~ 1, family = gaussian(link = "identity"), data = df)
+mod_full_i <- glm(brozek ~ ., family = gaussian(link = "identity"), data = df)
+
+mod_i_step <- stepAIC(mod_nulo_i, 
+                      scope = list(lower = mod_nulo_i, upper = mod_full_i), 
+                      direction = "both", 
+                      k = log(n_obs), 
+                      trace = FALSE)
+bic_i_step <- round(BIC(mod_i_step), 2)
+
+# 2. Extracción y limpieza de coeficientes
+tabla_step_i <- tidy(mod_i_step)
+
+# 3. Formateo de la tabla para presentación
+tabla_step_i %>%
+  dplyr::mutate(
+    estimate = round(estimate, 4),
+    std.error = round(std.error, 4),
+    statistic = round(statistic, 4),
+    p.value = format.pval(p.value, eps = 0.0001, scientific = TRUE)
+  ) %>%
+  dplyr::select(
+    `Variable Predictora` = term, 
+    `Estimación` = estimate, 
+    `Error Est.` = std.error, 
+    `Valor t` = statistic, 
+    `Valor p` = p.value
+  ) %>%
+  kable(
+    caption = paste0("Modelo Seleccionado vía Stepwise | BIC: ", bic_i_step), 
+    booktabs = TRUE, 
+    align = "lcccc"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"), 
+    full_width = FALSE, 
+    position = "center", 
+    latex_options = "hold_position"
+  ) %>% 
+    row_spec(0, bold = TRUE, color = "white", background = "#826430")
+```
+
+El algoritmo iterativo por pasos convergió de manera exacta al mismo modelo que la búsqueda exhaustiva (*Mejor subconjunto*), estabilizándose en el mismo BIC óptimo de 1432.16. Las variables seleccionadas son idénticas: `abdom`, `weight`, `wrist` y `forearm`.
+
+## 2.3 Método Lasso (con reestimación MV)
+
+Para este tercer enfoque, se estructuró el problema de selección como uno de optimización con penalizaciones. Se aplicó el método Lasso utilizando una malla de valores para el hiperparámetro de regularización, fijando el número de valores en $nlambda = 10000$. Dado que las estimaciones originales de Lasso reducen los coeficientes hacia cero y no corresponden a los estimadores de máxima verosimilitud, se utilizó el enfoque "relaxed" (`relax = TRUE`). Este procedimiento de dos pasos selecciona primero las variables con coeficientes distintos de cero y luego reajusta el modelo usando máxima verosimilitud clásica sobre ese subconjunto activo.
+
+```{r i_lasso, echo=FALSE, warning=FALSE, message=FALSE}
+# 1. Matriz de diseño y ajuste Lasso relajado
+X_i <- model.matrix(brozek ~ ., data = df)[, -1]
+Y <- df$brozek
+fit_lasso_i <- glmnet(X_i, Y, family = "gaussian", nlambda = 10000, relax = TRUE)
+
+# 2. Cálculo manual del BIC proporcional para la malla
+bic_lasso_i_vec <- -((fit_lasso_i$relaxed$nulldev) - fit_lasso_i$relaxed$nulldev * (1 - fit_lasso_i$relaxed$dev.ratio)) + log(n_obs) * fit_lasso_i$relaxed$df
+
+# 3. Selección de variables del mejor modelo en la malla
+min_idx_i <- which.min(bic_lasso_i_vec)
+coef_lasso_i <- coef(fit_lasso_i$relaxed)[, min_idx_i]
+vars_lasso_i <- names(coef_lasso_i[coef_lasso_i != 0])[-1] # Se omite el intercepto
+
+# 4. Ajuste final del modelo GLM para extraer BIC real e inferencias
+form_lasso_i <- as.formula(paste("brozek ~", paste(vars_lasso_i, collapse = " + ")))
+mod_i_lasso <- glm(form_lasso_i, family = gaussian(link = "identity"), data = df)
+bic_i_lasso <- round(BIC(mod_i_lasso), 2)
+
+# 5. Extracción y presentación de la tabla
+tabla_lasso_i <- broom::tidy(mod_i_lasso)
+
+tabla_lasso_i %>%
+  dplyr::mutate(
+    estimate = round(estimate, 4),
+    std.error = round(std.error, 4),
+    statistic = round(statistic, 4),
+    p.value = format.pval(p.value, eps = 0.0001, scientific = TRUE)
+  ) %>%
+  dplyr::select(
+    `Variable Predictora` = term, 
+    `Estimación` = estimate, 
+    `Error Est.` = std.error, 
+    `Valor t` = statistic, 
+    `Valor p` = p.value
+  ) %>%
+  kable(
+    caption = paste0("Modelo Seleccionado vía Lasso (Relaxed) | BIC: ", bic_i_lasso), 
+    booktabs = TRUE, 
+    align = "lcccc"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"), 
+    full_width = FALSE, 
+    position = "center", 
+    latex_options = "hold_position"
+  ) %>% 
+    row_spec(0, bold = TRUE, color = "white", background = "#826430")
+```
+
+A diferencia de los métodos de búsqueda exhaustiva (mejor subconjunto) y stepwise, el algoritmo Lasso retuvo un modelo considerablemente más denso, compuesto por 13 variables predictoras. Como consecuencia directa de esta menor parsimonia, el criterio de información BIC se elevó a 1458.76, indicando un ajuste penalizado inferior en comparación con los métodos discretos (cuyo BIC fue de 1432.16). El modelo ganador penalizó con un hiperparámetro lambda de  0.0593 encontrado en una malla de 10000 lambdas.
+
+A pesar de la inclusión de numerosas variables periféricas (como `ankle`, `biceps` o `chest`), las dinámicas centrales se mantienen estables: la variable `abdom` ($0.8712$) y la variable `weight` ($-0.1629$) conservan una fuerte significancia estadística y la misma dirección en sus efectos. Esto reitera que, independientemente de la técnica de regularización o el tamaño final del modelo, la relación estructural entre la circunferencia abdominal y el peso corporal es el pilar predictivo de esta base de datos.
+
+# 3. Selección con interacciones
+
+En esta fase, se amplía el modelo para incluir interacciones de segundo orden (`.^2`) entre las variables predictoras. Esto permite capturar relaciones conjuntas entre las características físicas del individuo, aunque incrementa el número de modelos posibles a evaluar.
+
+## 3.1 Método Stepwise
+
+Se ejecutó el algoritmo iterativo bidireccional (`both`) partiendo del modelo nulo y permitiendo que la búsqueda alcanzara el modelo completo con todas las interacciones dobles. Nuevamente, la selección fue penalizada a través del criterio $BIC$ para mitigar el riesgo de sobreajuste ante la alta dimensionalidad.
+
+```{r stepwise_ii, echo=FALSE, warning=FALSE, message=FALSE}
+# 1. Definición del modelo completo con interacciones
+# Nota: mod_nulo_i ya fue definido en el bloque anterior
+mod_full_ii <- glm(brozek ~ .^2, family = gaussian(link = "identity"), data = df)
+
+# 2. Búsqueda Stepwise
+mod_ii_step <- stepAIC(mod_nulo_i, 
+                       scope = list(lower = mod_nulo_i, upper = mod_full_ii), 
+                       direction = "both", 
+                       k = log(n_obs), 
+                       trace = FALSE)
+
+bic_ii_step <- round(BIC(mod_ii_step), 2)
+
+# 3. Extracción y limpieza de coeficientes
+tabla_step_ii <- broom::tidy(mod_ii_step)
+
+# 4. Formateo de la tabla para presentación ejecutiva
+tabla_step_ii %>%
+  dplyr::mutate(
+    estimate = round(estimate, 4),
+    std.error = round(std.error, 4),
+    statistic = round(statistic, 4),
+    p.value = format.pval(p.value, eps = 0.0001, scientific = TRUE)
+  ) %>%
+  dplyr::select(
+    `Variable Predictora` = term, 
+    `Estimación` = estimate, 
+    `Error Est.` = std.error, 
+    `Valor t` = statistic, 
+    `Valor p` = p.value
+  ) %>%
+  kable(
+    caption = paste0("Modelo Seleccionado vía Stepwise (con Interacciones) | BIC: ", bic_ii_step), 
+    booktabs = TRUE, 
+    align = "lcccc"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"), 
+    full_width = FALSE, 
+    position = "center", 
+    latex_options = "hold_position"
+  ) %>% 
+    row_spec(0, bold = TRUE, color = "white", background = "#826430")
+```
+
+Al permitir interacciones, el algoritmo identificó una estructura con un ajuste superior, logrando reducir el $BIC$ a 1424.99 (una mejora notable frente al 1432.16 del modelo aditivo estricto de efectos principales).
+
+El modelo final retiene tres efectos principales (`abdom`, `weight`, `wrist`) y añade un término de interacción altamente significativo: `abdom:weight` ($-0.0015$), lo que indica que el efecto de la circunferencia abdominal sobre el porcentaje de grasa corporal depende del peso: a mayores niveles de peso, dicho efecto es menor. Por ejemplo, un incremento de 1 cm en el abdomen puede implicar un aumento mayor en el porcentaje de grasa para una persona ligera que para una persona más pesada, donde parte del peso adicional puede no corresponder exclusivamente a grasa.
+
+## 3.2 Método Lasso
+
+Al aplicar Lasso relajado con $nlambda = 10000$, se construyó un modelo considerando todas las interacciones posibles (`.^2`). La selección de variables se basó en el BIC, calculado para cada modelo relajado.
+
+```{r ii_lasso, echo=FALSE, warning=FALSE, message=FALSE}
+X_ii <- model.matrix(brozek ~ .^2, data = df)[, -1]
+fit_lasso_ii <- glmnet(X_ii, Y, family = "gaussian", nlambda = 10000, relax = TRUE)
+
+bic_lasso_ii_vec <- -((fit_lasso_ii$relaxed$nulldev) - fit_lasso_ii$relaxed$nulldev * (1 - fit_lasso_ii$relaxed$dev.ratio)) + log(n_obs) * fit_lasso_ii$relaxed$df
+min_idx_ii <- which.min(bic_lasso_ii_vec)
+
+# Enfoque robusto usando la matriz de diseño completa
+coefs_opt_ii <- coef(fit_lasso_ii$relaxed)[, min_idx_ii]
+vars_activas_ii <- coefs_opt_ii != 0
+
+X_full_ii <- model.matrix(brozek ~ .^2, data = df)
+X_opt_ii <- X_full_ii[, vars_activas_ii]
+df_opt_ii <- data.frame(brozek = Y, X_opt_ii)
+
+# Ajuste GLM final sin intercepto automático
+mod_ii_lasso <- glm(brozek ~ -1 + ., family = gaussian(link = "identity"), data = df_opt_ii)
+bic_ii_lasso <- round(BIC(mod_ii_lasso), 2)
+
+tabla_lasso_ii <- broom::tidy(mod_ii_lasso) %>%
+  dplyr::arrange(p.value) %>%
+  dplyr::slice(1:15)
+
+tabla_lasso_ii %>%
+  dplyr::mutate(
+    estimate = round(estimate, 4),
+    std.error = round(std.error, 4),
+    statistic = round(statistic, 4),
+    p.value = format.pval(p.value, eps = 0.0001, scientific = TRUE)
+  ) %>%
+  dplyr::select(`Variable Predictora` = term, `Estimación` = estimate, `Error Est.` = std.error, `Valor t` = statistic, `Valor p` = p.value) %>%
+  kable(caption = paste0("Modelo Seleccionado vía Lasso Relaxed con Interacciones | BIC: ", bic_ii_lasso), booktabs = TRUE, align = "lcccc") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE, position = "center", latex_options = "hold_position") %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#826430")
+```
+
+A diferencia del algoritmo Stepwise (que logró un $BIC$ excelente de 1424.99), el método Lasso relajado tuvo un desempeño deficiente en este espacio de interacciones masivas. En particular, el modelo resultante retiene un número elevado de predictores, lo que se traduce en una menor parsimonia y un BIC más alto. El modelo ganador penalizó con un hiperparámetro lambda de  0.1117 encontrado en una malla de 10000 lambdas.
+
+Para un modelo con interacciones en esta base de datos, el algoritmo discreto (Stepwise) es infinitamente superior al enfoque de regularización evaluado, logrando aislar la interacción clave (`abdom:weight`) sin saturar el modelo.  En contraste, Lasso tiende a mantener un conjunto más amplio de variables, lo que dificulta la interpretación y no mejora el ajuste penalizado.
+
+# 4. Distribución Gamma y términos cuadráticos
+
+## 4.1 Stepwise (Gamma + Cuadráticos)
+
+Se explora una distribución Gamma (con **liga logarítmica** para garantizar predicciones positivas) y se añaden términos cuadráticos de las variables continuas. Por eficiencia computacional y robustez, se utiliza el enfoque Lasso.
+
+
+```{r iii_gamma_lasso, echo=FALSE, warning=FALSE, message=FALSE}
+# Construimos matriz con interacciones y términos cuadráticos
+var_names <- names(df)[names(df) != "brozek"]
+cuadraticos <- paste0("I(", var_names, "^2)")
+form_completa <- as.formula(paste("brozek ~ .^2 +", paste(cuadraticos, collapse = " + ")))
+
+mod_nulo_iii <- glm(brozek ~ 1, family = Gamma(link="log"), data = df)
+mod_full_iii <- glm(form_completa, family = Gamma(link="log"), data = df)
+
+mod_iii_step <- stepAIC(mod_nulo_iii, 
+                        scope = list(lower = mod_nulo_iii, upper = mod_full_iii), 
+                        direction = "both", 
+                        k = log(n_obs), 
+                        trace = FALSE)
+bic_iii_gamma <- round(BIC(mod_iii_step), 2)
+
+tabla_step_iii <- broom::tidy(mod_iii_step) %>%
+  dplyr::mutate(
+    estimate = round(estimate, 5), # Un decimal más debido a la escala de la liga log y términos cuadráticos
+    std.error = round(std.error, 5),
+    statistic = round(statistic, 4),
+    p.value = format.pval(p.value, eps = 0.0001, scientific = TRUE)
+  ) %>%
+  dplyr::select(`Variable Predictora` = term, `Estimación` = estimate, `Error Est.` = std.error, `Valor t` = statistic, `Valor p` = p.value)
+
+kable(tabla_step_iii, caption = paste0("Modelo Seleccionado vía Stepwise (Gamma + Cuadráticos) | BIC: ", bic_iii_gamma), booktabs = TRUE, align = "lcccc") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE, position = "center", latex_options = "hold_position") %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#826430")
+```
+
+El cambio a la distribución Gamma y la introducción de curvatura generó un modelo con un BIC de **1510.30**. Las variables seleccionadas incluyen efectos principales (`abdom`, `wrist`) y términos puramente cuadráticos (`I(weight^2)`, `I(abdom^2)`). 
+
+La selección de variables al cuadrado sugiere la presencia de cierta curvatura en la relación entre el porcentaje de grasa corporal y algunas variables explicativas.  Sin embargo, al comparar el valor del BIC, esta mayor flexibilidad no se traduce en una mejora del ajuste penalizado. Por el contrario, el modelo resulta menos parsimonioso y presenta un desempeño inferior frente a los modelos gaussianos considerados previamente.
+
+## 4.2 Lasso Relaxed (Gamma con Interacciones)
+
+Se aplicó Lasso con una malla de $nlambda=10000$ valores y bajo el esquema `relaxed`, el cual permite una reestimación por máxima verosimilitud sobre el subconjunto seleccionado, reduciendo el sesgo de la penalización.
+
+```{r iii_lasso, echo=FALSE, warning=FALSE, message=FALSE}
+X_iii <- model.matrix(brozek ~ .^2, data = df)[, -1]
+fit_lasso_iii <- glmnet(X_iii, Y, family = Gamma(link = "log"), nlambda = 10000, relax = TRUE)
+
+bic_lasso_iii_vec <- -((fit_lasso_iii$relaxed$nulldev) - fit_lasso_iii$relaxed$nulldev * (1 - fit_lasso_iii$relaxed$dev.ratio)) + log(n_obs) * fit_lasso_iii$relaxed$df
+min_idx_iii <- which.min(bic_lasso_iii_vec)
+
+# Enfoque robusto usando la matriz de diseño completa
+coefs_opt_iii <- coef(fit_lasso_iii$relaxed)[, min_idx_iii]
+vars_activas_iii <- coefs_opt_iii != 0
+
+X_full_iii <- model.matrix(brozek ~ .^2, data = df)
+X_opt_iii <- X_full_iii[, vars_activas_iii]
+df_opt_iii <- data.frame(brozek = Y, X_opt_iii)
+
+# Ajuste GLM final sin intercepto automático
+mod_iii_lasso <- glm(brozek ~ -1 + ., family = Gamma(link = "log"), data = df_opt_iii)
+bic_iii_lasso <- round(BIC(mod_iii_lasso), 2)
+
+tabla_lasso_iii <- broom::tidy(mod_iii_lasso) %>%
+  dplyr::arrange(p.value) %>%
+  dplyr::slice(1:15)
+
+tabla_lasso_iii %>%
+  dplyr::mutate(
+    estimate = round(estimate, 4),
+    std.error = round(std.error, 4),
+    statistic = round(statistic, 4),
+    p.value = format.pval(p.value, eps = 0.0001, scientific = TRUE)
+  ) %>%
+  dplyr::select(`Variable Predictora` = term, `Estimación` = estimate, `Error Est.` = std.error, `Valor t` = statistic, `Valor p` = p.value) %>%
+  kable(caption = paste0("Modelo Seleccionado vía Lasso Relaxed (Gamma con Interacciones) | BIC: ", bic_iii_lasso), booktabs = TRUE, align = "lcccc") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE, position = "center", latex_options = "hold_position") %>%
+  row_spec(0, bold = TRUE, color = "white", background = "#826430")
+```
+El modelo Lasso relajado selecciona principalmente la variable `abdom` como predictor relevante, con un efecto positivo altamente significativo. Sin embargo, el ajuste global es deficiente, alcanzando un $BIC$ de 1551.97, considerablemente mayor al obtenido con Stepwise.
+
+Esto indica que, aun con una estructura más compleja, el modelo no logra mejorar el desempeño penalizado. En consecuencia, el enfoque Lasso bajo distribución Gamma no resulta competitivo para esta base de datos, favoreciendo nuevamente a los métodos discretos en términos de parsimonia y ajuste.
+
+# 5. Resumen y Conclusiones
+
+## 5.1. Comparativa de Modelos
+
+A continuación, se presenta el consolidado de todos los métodos evaluados durante el análisis, ordenados para su comparación a través del criterio de información Bayesiano (BIC).
+
+```{r tabla_resumen, echo=FALSE}
+df_resumen <- data.frame(
+  `Inciso` = c("i. Efectos Principales", "i. Efectos Principales", "i. Efectos Principales",
+               "ii. Interacciones", "ii. Interacciones",
+               "iii. Modificación Gamma + Cuad.", "iii. Gamma con Interacciones"),
+  `Método` = c("Mejor subconjunto", "Stepwise", "Lasso (Relaxed)",
+               "Stepwise", "Lasso (Relaxed)",
+               "Stepwise", "Lasso (Relaxed)"),
+  `N. Parámetros` = c(
+    length(coef(resultado)),
+    length(coef(mod_i_step)),
+    length(coef(mod_i_lasso)),
+    length(coef(mod_ii_step)),
+    length(coef(mod_ii_lasso)),
+    length(coef(mod_iii_step)),
+    length(coef(mod_iii_lasso))
+  ),
+  `BIC` = c(BIC(resultado), bic_i_step, bic_i_lasso, bic_ii_step, bic_ii_lasso, bic_iii_gamma, bic_iii_lasso),
+  check.names = FALSE
+)
+
+kable(df_resumen, caption = "Comparativa Final de Criterios de Información (BIC)", booktabs = TRUE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE, position = "center", latex_options = "hold_position") %>%
+  row_spec(which.min(df_resumen$BIC), background = "#FDF5E6", bold = TRUE) %>% 
+    row_spec(0, bold = TRUE, color = "white", background = "#826430")
+```
+En términos comparativos, el mejor desempeño se obtiene con el modelo de Stepwise con interacciones, alcanzando el menor $BIC$ (1424.99) con solo 5 parámetros, lo que refleja un balance óptimo entre ajuste y parsimonia. 
+
+## 5.2. Discusión de Resultados
+
+Al comparar los distintos métodos de selección, se observan algunos puntos consistentes:
+
+* **Variables clave:** Las mediciones de `abdom` (circunferencia abdominal) y `weight` (peso total) demostraron ser los predictores fundamentales. Estas variables aparecen de forma recurrente en prácticamente todos los modelos, esto sugiere que gran parte de la variación en el porcentaje de grasa corporal se explica por estas dos medidas.
+
+* **Variables excluidas:** Es importante puntualizar, desde una perspectiva estadística rigurosa, que algunas variables (como edad o cuello) no aparezcan en los modelos finales no implica que no estén relacionadas con la variable respuesta, sino que, una vez consideradas las variables seleccionadas, ya no aportan información adicional relevante.  La lectura metodológica correcta es que, dado el subconjunto de variables ya seleccionado (`abdom`, `weight`, etc.), los predictores excluidos dejaron de aportar información adicional relevante para el modelado predictivo.
+
+* **Interacciones y Preprocesamiento:** De acuerdo a los resultados observados, la incorporación de interacciones probó mejorar el ajuste, como se observa en el modelo Gaussiano con Stepwise, que alcanza el BIC mínimo absoluto (**1424.99**). Además, el filtrado de datos atípicos fue importante para evitar que valores extremos afectaran los resultados; sin él, los métodos de regularización habrían modificado la función objetivo a minimizar para intentar compensar el ruido sistemático de estos *outliers* estructurales.
+
+* **Desempeño de Lasso:** En escenarios de alta dimensionalidad y fuerte multicolinealidad (como la matriz de interacciones dobles), el método Lasso relajado fue el que arrojó resultados menos óptimos. Al forzar asociaciones fuertemente correlacionadas, la penalización se tradujo en una sobreparametrización (reteniendo decenas de variables), disparando el BIC. En contraste, los métodos de optimización discreta (como *Stepwise*) lograron mantener la parsimonia. En el caso con muchas interacciones, Lasso tiende a seleccionar demasiadas variables, lo que resulta en modelos menos parsimoniosos y con mayor BIC. En este contexto, el método Stepwise logró un mejor balance entre ajuste y simplicidad.
+
+## 5.3. Interpretación del Modelo Ganador
+
+Considerando estrictamente el Criterio de Información Bayesiano (BIC), el **Stepwise con Interacciones y Distribución Gaussiana** (Modelo  3.1) se elige como la regla de predicción óptima. Su estructura final responde a la siguiente ecuación:
+
+```{r best_model_summary, echo=FALSE}
+tabla_step_ii %>%
+  dplyr::mutate(
+    estimate = round(estimate, 4),
+    std.error = round(std.error, 4),
+    statistic = round(statistic, 4),
+    p.value = format.pval(p.value, eps = 0.0001, scientific = TRUE)
+  ) %>%
+  dplyr::select(
+    `Variable Predictora` = term, 
+    `Estimación` = estimate, 
+    `Error Est.` = std.error, 
+    `Valor t` = statistic, 
+    `Valor p` = p.value
+  ) %>%
+  kable(
+    caption = paste0("Modelo Seleccionado vía Stepwise (con Interacciones) | BIC: ", bic_ii_step), 
+    booktabs = TRUE, 
+    align = "lcccc"
+  ) %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"), 
+    full_width = FALSE, 
+    position = "center", 
+    latex_options = "hold_position"
+  ) %>% 
+    row_spec(0, bold = TRUE, color = "white", background = "#826430")
+```
+
+$$ \text{brozek} = -48.324 + 1.159(\text{abdom}) + 0.053(\text{weight}) - 1.350(\text{wrist}) - 0.00148(\text{abdom} \times \text{weight}) $$
+
+**Análisis de los Coeficientes:**
+
+1. **Circunferencia Abdominal (`abdom` = 1.159):** Actúa como el motor primario del modelo.  Manteniendo todo lo demás constante, un mayor abdomen se asocia claramente con un mayor porcentaje de grasa corporal.
+
+2. **Grosor de la Muñeca (`wrist` = -1.350):** Tiene un efecto negativo, lo que sugiere que personas con muñecas más gruesas tienden a tener menor porcentaje de grasa, dado el mismo abdomen. Esto puede interpretarse como una diferencia en la complexión corporal (por ejemplo, mayor estructura ósea).
+
+3. **Efecto Moderador (`abdom:weight` = -0.00148):** La presencia de esta interacción negativa es el hallazgo clínico más interesante del modelo. Revela que el efecto del abdomen sobre la grasa corporal *no es estrictamente lineal ni constante*, sino que se encuentra atenuado por el peso. Matemáticamente, el impacto marginal de un centímetro extra de abdomen está dictado por $(1.159 - 0.00148 \times \text{weight})$. Clínicamente, esto indica que en individuos de alto peso, el incremento del perímetro abdominal suma proporcionalmente *menos* grasa corporal que en una persona ligera. 
+
+```{r session_info, echo=TRUE}
+sessionInfo()
+```
