@@ -59,6 +59,10 @@ Key packages: `faraway 1.0.9` · `glmnet 4.1-10` · `bestglm 0.37.3` · `leaps 3
 
 Full session info is included at the end of the compiled document.
 
+## Language
+
+The analysis report (Rmd / notebook text) is written in Spanish; this README is in English.
+
 ## Authors
 
 Dámaso López, Alexis Aminadab · Islas Zicatl, Max Emiliano · Mares Guerra, José de Jesús · Martínez Sánchez, José Ricardo · Ramos López, Gabriela · Salazar Argáez, Miguel Angel
