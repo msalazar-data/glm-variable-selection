@@ -9,7 +9,7 @@ Statistical analysis applying multiple variable selection strategies to identify
 - Applies three variable selection approaches under different model families:
   - Best subset selection (BIC criterion)
   - Stepwise backward elimination (BIC)
-  - Lasso regularization (cross-validated lambda)
+  - Relaxed Lasso over a 10,000-value lambda grid (lambda selected by BIC)
 - Compares models with main effects only vs. interactions and quadratic terms
 - Evaluates Gaussian (identity link) and Gamma (log link) families
 - Selects the optimal model based on BIC, residual deviance, and interpretability
@@ -20,7 +20,7 @@ Statistical analysis applying multiple variable selection strategies to identify
 - Best subset selection — `bestglm`
 - Stepwise selection — `MASS::stepAIC`
 - Lasso regularization — `glmnet`
-- Cross-validation for lambda tuning
+- Lambda selection by BIC along the regularization path
 - Residual diagnostics and model comparison
 
 ## Stack
@@ -36,7 +36,7 @@ library(faraway)
 data(fat)
 ```
 
-178 observations · 18 variables · Source: Penrose et al. (1985)
+252 observations · 18 variables · Source: Penrose et al. (1985)
 
 ## How to run
 
